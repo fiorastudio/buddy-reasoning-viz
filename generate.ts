@@ -1,14 +1,44 @@
 #!/usr/bin/env bun
 import { Database } from "bun:sqlite";
-import { writeFileSync } from "fs";
-import { join } from "path";
+import { writeFileSync, readdirSync, readFileSync } from "fs";
+import { join, basename, dirname } from "path";
 import { homedir } from "os";
 import { exec } from "child_process";
+import { createHash } from "crypto";
 
 // --- Config ---
 const DB_PATH = join(homedir(), ".buddy", "buddy.db");
 const OUT_DIR = import.meta.dir;
 const SESSION_FILTER = process.argv[2] || null; // optional: pass session_id as arg
+
+// --- Resolve session hashes to project names ---
+function buildCwdHashMap(): Map<string, string> {
+  const map = new Map<string, string>();
+  const sessionsDir = join(homedir(), ".claude", "sessions");
+  try {
+    const files = readdirSync(sessionsDir).filter((f) => f.endsWith(".json"));
+    for (const file of files) {
+      try {
+        const data = JSON.parse(
+          readFileSync(join(sessionsDir, file), "utf-8")
+        );
+        if (data.cwd) {
+          const hash = createHash("sha256")
+            .update(data.cwd)
+            .digest("hex")
+            .slice(0, 16);
+          const parent = basename(dirname(data.cwd));
+          const folder = basename(data.cwd);
+          map.set(hash, `${parent}/${folder}`);
+        }
+      } catch {}
+    }
+  } catch {}
+  return map;
+}
+
+const cwdHashMap = buildCwdHashMap();
+console.log(`Resolved ${cwdHashMap.size} project paths from Claude sessions`);
 
 // --- Color palettes ---
 const BASIS_COLORS: Record<string, string> = {
@@ -108,8 +138,29 @@ for (const e of edges) {
   degreeMap.set(e.to_claim, (degreeMap.get(e.to_claim) || 0) + 1);
 }
 
-// --- Collect sessions ---
+// --- Collect sessions and build project/date structures ---
 const sessions = [...new Set(claims.map((c) => c.session_id))].sort();
+
+// Parse session IDs into project + date
+const sessionMeta = sessions.map((sid) => {
+  const parts = sid.split("-");
+  const date = parts.slice(-1)[0]; // YYYYMMDD
+  const hash = parts.slice(0, -1).join("-"); // everything before date
+  const projectName = cwdHashMap.get(hash) || hash.slice(0, 8) + "…";
+  return { session_id: sid, hash, date, projectName };
+});
+
+const projects = [...new Set(sessionMeta.map((s) => s.hash))].map((hash) => ({
+  hash,
+  name: cwdHashMap.get(hash) || hash.slice(0, 8) + "…",
+}));
+
+const datesByProject = new Map<string, string[]>();
+for (const s of sessionMeta) {
+  const list = datesByProject.get(s.hash) || [];
+  if (!list.includes(s.date)) list.push(s.date);
+  datesByProject.set(s.hash, list.sort());
+}
 
 // --- Build vis.js nodes ---
 const claimIds = new Set(claims.map((c) => c.id));
@@ -319,10 +370,17 @@ const html = `<!DOCTYPE html>
   </div>
 
   <div class="section">
-    <h3>Session</h3>
-    <select id="sessionFilter">
-      <option value="all">All Sessions (${sessions.length})</option>
-      ${sessions.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("\n      ")}
+    <h3>Project</h3>
+    <select id="projectFilter">
+      <option value="all">All Projects (${projects.length})</option>
+      ${projects.map((p) => `<option value="${esc(p.hash)}">${esc(p.name)}</option>`).join("\n      ")}
+    </select>
+  </div>
+
+  <div class="section">
+    <h3>Date</h3>
+    <select id="dateFilter">
+      <option value="all">All Dates</option>
     </select>
   </div>
 
@@ -338,6 +396,18 @@ const html = `<!DOCTYPE html>
         .map(
           ([basis, color]) =>
             `<div class="filter-chip" data-basis="${basis}"><span class="dot" style="background:${color}"></span>${basis}</div>`
+        )
+        .join("\n      ")}
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Filter by Edge Type</h3>
+    <div class="filters" id="edgeFilters">
+      ${Object.entries(EDGE_COLORS)
+        .map(
+          ([type, color]) =>
+            `<div class="filter-chip" data-edge="${type}"><span class="dot" style="background:${color}"></span>${type.replace("_", " ")}</div>`
         )
         .join("\n      ")}
     </div>
@@ -391,6 +461,8 @@ const html = `<!DOCTYPE html>
 const RAW_NODES = ${JSON.stringify(visNodes).replace(/<\/script>/gi, "<\\/script>")};
 const RAW_EDGES = ${JSON.stringify(visEdges).replace(/<\/script>/gi, "<\\/script>")};
 const ALL_SESSIONS = ${JSON.stringify(sessions)};
+const SESSION_META = ${JSON.stringify(sessionMeta)};
+const DATES_BY_PROJECT = ${JSON.stringify(Object.fromEntries(datesByProject))};
 
 const nodes = new vis.DataSet(RAW_NODES);
 const edges = new vis.DataSet(RAW_EDGES);
@@ -505,8 +577,28 @@ network.on("doubleClick", (params) => {
   }
 });
 
-// --- Session filter ---
-document.getElementById("sessionFilter").addEventListener("change", applyFilters);
+// --- Project filter ---
+const projectFilter = document.getElementById("projectFilter");
+const dateFilter = document.getElementById("dateFilter");
+
+function formatDate(d) {
+  return d.slice(0, 4) + "-" + d.slice(4, 6) + "-" + d.slice(6, 8);
+}
+
+projectFilter.addEventListener("change", () => {
+  const hash = projectFilter.value;
+  dateFilter.innerHTML = '<option value="all">All Dates</option>';
+  if (hash !== "all" && DATES_BY_PROJECT[hash]) {
+    DATES_BY_PROJECT[hash].forEach(d => {
+      const opt = document.createElement("option");
+      opt.value = d;
+      opt.textContent = formatDate(d);
+      dateFilter.appendChild(opt);
+    });
+  }
+  applyFilters();
+});
+dateFilter.addEventListener("change", applyFilters);
 
 // --- Search ---
 let searchTerm = "";
@@ -516,9 +608,8 @@ document.getElementById("searchBox").addEventListener("input", (e) => {
 });
 
 // --- Basis filter chips ---
-// Click = isolate to that basis + connected nodes. Click again = show all.
-let activeBasis = null; // null = show all, string = isolated basis
-document.querySelectorAll(".filter-chip").forEach(chip => {
+let activeBasis = null;
+document.querySelectorAll("#basisFilters .filter-chip").forEach(chip => {
   chip.addEventListener("click", () => {
     const basis = chip.dataset.basis;
     if (activeBasis === basis) {
@@ -526,7 +617,23 @@ document.querySelectorAll(".filter-chip").forEach(chip => {
       chip.classList.remove("active");
     } else {
       activeBasis = basis;
-      document.querySelectorAll(".filter-chip").forEach(c => c.classList.remove("active"));
+      document.querySelectorAll("#basisFilters .filter-chip").forEach(c => c.classList.remove("active"));
+      chip.classList.add("active");
+    }
+    applyFilters();
+  });
+});
+
+// --- Edge type filter chips ---
+const activeEdgeTypes = new Set();
+document.querySelectorAll("#edgeFilters .filter-chip").forEach(chip => {
+  chip.addEventListener("click", () => {
+    const edgeType = chip.dataset.edge;
+    if (activeEdgeTypes.has(edgeType)) {
+      activeEdgeTypes.delete(edgeType);
+      chip.classList.remove("active");
+    } else {
+      activeEdgeTypes.add(edgeType);
       chip.classList.add("active");
     }
     applyFilters();
@@ -542,15 +649,26 @@ RAW_EDGES.forEach(e => {
   adjacency.get(e.to).add(e.from);
 });
 
-function applyFilters() {
-  const session = document.getElementById("sessionFilter").value;
+// Parse session_id into hash and date
+function parseSessionId(sid) {
+  const parts = sid.split("-");
+  const date = parts[parts.length - 1];
+  const hash = parts.slice(0, -1).join("-");
+  return { hash, date };
+}
 
-  // Step 1: find primary matching nodes (basis + session + search)
+function applyFilters() {
+  const selectedProject = projectFilter.value;
+  const selectedDate = dateFilter.value;
+
+  // Step 1: find primary matching nodes
   const primaryIds = new Set();
   RAW_NODES.forEach(n => {
     const m = n._meta;
     let match = true;
-    if (session !== "all" && m.session_id !== session) match = false;
+    const { hash, date } = parseSessionId(m.session_id);
+    if (selectedProject !== "all" && hash !== selectedProject) match = false;
+    if (selectedDate !== "all" && date !== selectedDate) match = false;
     if (activeBasis && m.basis !== activeBasis) match = false;
     if (searchTerm && !m.text.toLowerCase().includes(searchTerm)) match = false;
     if (match) primaryIds.add(n.id);
@@ -563,35 +681,51 @@ function applyFilters() {
       const neighbors = adjacency.get(id);
       if (neighbors) {
         neighbors.forEach(nid => {
-          // Only include neighbor if it passes session filter
           const neighborNode = RAW_NODES.find(n => n.id === nid);
           if (neighborNode) {
-            if (session === "all" || neighborNode._meta.session_id === session) {
-              visibleIds.add(nid);
-            }
+            const { hash, date } = parseSessionId(neighborNode._meta.session_id);
+            const projectOk = selectedProject === "all" || hash === selectedProject;
+            const dateOk = selectedDate === "all" || date === selectedDate;
+            if (projectOk && dateOk) visibleIds.add(nid);
           }
         });
       }
     });
   }
 
-  // Step 3: apply visibility
+  // Step 3: if edge type filter active, only show nodes connected by those edge types
+  let filteredEdgeNodeIds = null;
+  if (activeEdgeTypes.size > 0) {
+    filteredEdgeNodeIds = new Set();
+    RAW_EDGES.forEach(e => {
+      if (activeEdgeTypes.has(e._meta.type)) {
+        filteredEdgeNodeIds.add(e.from);
+        filteredEdgeNodeIds.add(e.to);
+      }
+    });
+  }
+
+  // Step 4: apply visibility
   const nodeUpdates = [];
   RAW_NODES.forEach(n => {
-    nodeUpdates.push({ id: n.id, hidden: !visibleIds.has(n.id) });
+    let visible = visibleIds.has(n.id);
+    if (visible && filteredEdgeNodeIds) visible = filteredEdgeNodeIds.has(n.id);
+    nodeUpdates.push({ id: n.id, hidden: !visible });
   });
   nodes.update(nodeUpdates);
 
+  const finalVisibleNodes = new Set(nodeUpdates.filter(u => !u.hidden).map(u => u.id));
   const edgeUpdates = [];
   RAW_EDGES.forEach(e => {
-    const visible = visibleIds.has(e.from) && visibleIds.has(e.to);
+    let visible = finalVisibleNodes.has(e.from) && finalVisibleNodes.has(e.to);
+    if (visible && activeEdgeTypes.size > 0) visible = activeEdgeTypes.has(e._meta.type);
     edgeUpdates.push({ id: e.id, hidden: !visible });
   });
   edges.update(edgeUpdates);
 
   // Highlight search matches
   if (searchTerm) {
-    const matchIds = [...primaryIds].slice(0, 20);
+    const matchIds = [...primaryIds].filter(id => finalVisibleNodes.has(id)).slice(0, 20);
     if (matchIds.length > 0) network.selectNodes(matchIds);
   } else {
     network.unselectAll();
