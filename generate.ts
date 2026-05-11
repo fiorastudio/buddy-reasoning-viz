@@ -63,6 +63,7 @@ const CAUTION_FINDINGS = new Set([
   "load_bearing_vibes",
   "unchallenged_chain",
   "echo_chamber",
+  "unverified_hedge",
 ]);
 const KUDOS_FINDINGS = new Set([
   "well_sourced_load_bearer",
