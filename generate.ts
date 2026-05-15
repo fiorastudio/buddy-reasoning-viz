@@ -40,17 +40,21 @@ function buildCwdHashMap(): Map<string, string> {
 const cwdHashMap = buildCwdHashMap();
 console.log(`Resolved ${cwdHashMap.size} project paths from Claude sessions`);
 
-// --- Color palettes ---
-const BASIS_COLORS: Record<string, string> = {
-  research: "#2196F3",
-  empirical: "#4CAF50",
-  deduction: "#9C27B0",
-  analogy: "#FF9800",
-  definition: "#607D8B",
-  llm_output: "#FFC107",
-  assumption: "#F44336",
-  vibes: "#E91E63",
+// --- Basis style map ---
+const BASIS_STYLES: Record<string, { color: string; shape: string; label: string }> = {
+  research: { color: "#1E88E5", shape: "trapezoid", label: "research" },
+  empirical: { color: "#43A047", shape: "diamond", label: "empirical" },
+  deduction: { color: "#8E24AA", shape: "circle", label: "deduction" },
+  analogy: { color: "#FB8C00", shape: "rect", label: "analogy" },
+  definition: { color: "#546E7A", shape: "hexagon", label: "definition" },
+  llm_output: { color: "#FDD835", shape: "octagon", label: "llm_output" },
+  assumption: { color: "#6D4C41", shape: "box", label: "assumption" },
+  vibes: { color: "#E53935", shape: "triangleDown", label: "vibes" },
 };
+
+const BASIS_COLORS: Record<string, string> = Object.fromEntries(
+  Object.entries(BASIS_STYLES).map(([basis, style]) => [basis, style.color])
+);
 
 const EDGE_COLORS: Record<string, string> = {
   supports: "#2196F3",
@@ -70,6 +74,48 @@ const KUDOS_FINDINGS = new Set([
   "productive_stress_test",
   "grounded_premise_adopted",
 ]);
+
+function svgMarkupForBasisShape(shape: string, fill: string, stroke: string, strokeWidth: number): string {
+  const common = `fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth}"`;
+  switch (shape) {
+    case "trapezoid":
+      return `<polygon points="22,12 78,12 92,88 8,88" ${common} />`;
+    case "diamond":
+      return `<polygon points="50,8 92,50 50,92 8,50" ${common} />`;
+    case "circle":
+      return `<circle cx="50" cy="50" r="38" ${common} />`;
+    case "wobble":
+      return `<path d="M18 28 C26 10, 46 8, 60 14 C82 18, 92 34, 88 54 C86 78, 64 92, 42 88 C22 86, 10 68, 12 48 C10 40, 12 34, 18 28 Z" ${common} />`;
+    case "rect":
+      return `<rect x="12" y="18" width="76" height="64" rx="4" ry="4" ${common} />`;
+    case "bowtie":
+      return `<polygon points="8,18 44,18 50,50 56,18 92,18 64,50 92,82 56,82 50,50 44,82 8,82 36,50" ${common} />`;
+    case "hexagon":
+      return `<polygon points="25,10 75,10 92,50 75,90 25,90 8,50" ${common} />`;
+    case "octagon":
+      return `<polygon points="30,8 70,8 92,30 92,70 70,92 30,92 8,70 8,30" ${common} />`;
+    case "triangle":
+      return `<polygon points="50,8 92,88 8,88" ${common} />`;
+    case "triangleDown":
+      return `<polygon points="8,12 92,12 50,92" ${common} />`;
+    case "box":
+      return `<rect x="12" y="12" width="76" height="76" rx="6" ry="6" ${common} />`;
+    default:
+      return `<circle cx="50" cy="50" r="38" ${common} />`;
+  }
+}
+
+function makeNodeSvg(shape: string, fill: string, stroke: string, strokeWidth: number): string {
+  const body = svgMarkupForBasisShape(shape, fill, stroke, strokeWidth);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">${body}</svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
+function makeLegendIconSvg(shape: string, fill: string): string {
+  const body = svgMarkupForBasisShape(shape, fill, "rgba(0,0,0,0.18)", 4);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 100 100">${body}</svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
 
 // --- Read database ---
 console.log(`Opening database: ${DB_PATH}`);
@@ -186,17 +232,22 @@ const visNodes = claims.map((c) => {
   const label =
     c.text.length > 60 ? c.text.slice(0, 57) + "..." : c.text;
 
+  const basisShape = BASIS_STYLES[c.basis]?.shape || "dot";
+  const basisColor = BASIS_STYLES[c.basis]?.color || "#999";
+
   return {
     id: c.id,
     label,
     title: c.text,
-    shape: c.speaker === "user" ? "diamond" : "dot",
+    shape: "image",
+    image: makeNodeSvg(basisShape, basisColor, borderColor, borderWidth),
+    brokenImage: makeNodeSvg("dot", basisColor, borderColor, borderWidth),
     size: baseSize,
     color: {
-      background: BASIS_COLORS[c.basis] || "#999",
+      background: basisColor,
       border: borderColor,
       highlight: {
-        background: BASIS_COLORS[c.basis] || "#999",
+        background: basisColor,
         border: "#333",
       },
     },
@@ -332,7 +383,23 @@ const html = `<!DOCTYPE html>
   .filter-chip:hover { background: #e8e8e8; }
   .filter-chip.off { opacity: 0.3; }
   .filter-chip.active { background: #e3e8ff; border-color: #4a6cf7; font-weight: 600; }
+  .filter-chip .basis-icon { width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .filter-chip .basis-icon img { width: 14px; height: 14px; display: block; }
   .filter-chip .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .shape-dot { border-radius: 50%; }
+    .shape-box { border-radius: 2px; }
+  .shape-trapezoid { clip-path: polygon(18% 0%, 82% 0%, 100% 100%, 0% 100%); }
+  .shape-circle { border-radius: 50%; }
+  .shape-wobble { clip-path: polygon(14% 18%, 36% 3%, 68% 10%, 90% 30%, 85% 68%, 63% 92%, 28% 86%, 8% 58%); }
+  .shape-rect { border-radius: 4px; }
+  .shape-bowtie { clip-path: polygon(0% 20%, 44% 20%, 50% 50%, 56% 20%, 100% 20%, 66% 50%, 100% 80%, 56% 80%, 50% 50%, 44% 80%, 0% 80%, 34% 50%); }
+  .shape-diamond { transform: rotate(45deg); border-radius: 1px; }
+  .shape-triangle { border-bottom: 12px solid var(--basis-color, currentColor); border-top: 0; border-radius: 0; border-color: transparent transparent var(--basis-color, currentColor) transparent; border-style: solid; }
+  .shape-triangleDown { border-top: 12px solid var(--basis-color, currentColor); border-bottom: 0; border-radius: 0; border-color: var(--basis-color, currentColor) transparent transparent transparent; border-style: solid; }
+  .shape-star { clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%); }
+  .shape-hexagon { clip-path: polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%); }
+  .shape-octagon { clip-path: polygon(30% 0%, 70% 0%, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0% 70%, 0% 30%); }
+  .shape-database { border-radius: 999px / 6px; }
 
   #detail { min-height: 120px; }
   #detail .empty { color: #999; font-style: italic; font-size: 14px; }
@@ -349,7 +416,8 @@ const html = `<!DOCTYPE html>
   .stat-card .lbl { font-size: 12px; color: #666; }
 
   .legend-item { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 5px; color: #333; }
-  .legend-swatch { width: 16px; height: 16px; border-radius: 3px; flex-shrink: 0; }
+  .legend-swatch { width: 16px; height: 16px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; color: inherit; }
+  .legend-swatch img { width: 16px; height: 16px; display: block; }
   .legend-line { width: 22px; height: 3px; flex-shrink: 0; border-radius: 1px; }
   .legend-line.dashed { background: repeating-linear-gradient(to right, currentColor 0, currentColor 4px, transparent 4px, transparent 8px); height: 3px; }
 
@@ -393,10 +461,10 @@ const html = `<!DOCTYPE html>
   <div class="section">
     <h3>Isolate by Basis</h3>
     <div class="filters" id="basisFilters">
-      ${Object.entries(BASIS_COLORS)
+      ${Object.entries(BASIS_STYLES)
         .map(
-          ([basis, color]) =>
-            `<div class="filter-chip" data-basis="${basis}"><span class="dot" style="background:${color}"></span>${basis}</div>`
+          ([basis, style]) =>
+            `<div class="filter-chip" data-basis="${basis}"><span class="basis-icon"><img alt="" src="${makeLegendIconSvg(style.shape, style.color)}" /></span>${basis}</div>`
         )
         .join("\n      ")}
     </div>
@@ -431,10 +499,10 @@ const html = `<!DOCTYPE html>
 
   <div class="section">
     <h3>Legend — Basis</h3>
-    ${Object.entries(BASIS_COLORS)
+    ${Object.entries(BASIS_STYLES)
       .map(
-        ([basis, color]) =>
-          `<div class="legend-item"><div class="legend-swatch" style="background:${color}"></div>${basis}</div>`
+        ([basis, style]) =>
+          `<div class="legend-item"><div class="legend-swatch"><img alt="" src="${makeLegendIconSvg(style.shape, style.color)}" /></div>${basis}</div>`
       )
       .join("\n    ")}
   </div>
@@ -474,12 +542,12 @@ const network = new vis.Network(container, { nodes, edges }, {
     enabled: true,
     solver: "forceAtlas2Based",
     forceAtlas2Based: {
-      gravitationalConstant: -200,
-      centralGravity: 0.008,
-      springLength: 250,
-      springConstant: 0.03,
-      damping: 0.5,
-      avoidOverlap: 1.0
+      gravitationalConstant: -230,
+      centralGravity: 0.006,
+      springLength: 320,
+      springConstant: 0.025,
+      damping: 0.6,
+      avoidOverlap: 1.35
     },
     stabilization: { iterations: 400, fit: true },
     minVelocity: 0.75
@@ -496,11 +564,20 @@ const network = new vis.Network(container, { nodes, edges }, {
     multiselect: true
   },
   edges: {
-    smooth: { type: "curvedCW", roundness: 0.15 },
-    length: 250
+    smooth: {
+      enabled: true,
+      type: "dynamic",
+      roundness: 0.32,
+      forceDirection: "none"
+    },
+    length: 290,
+    width: 1.5,
+    selectionWidth: 2.5,
+    hoverWidth: 2
   },
   layout: {
     improvedLayout: true,
+    randomSeed: 7,
     clusterThreshold: 150
   },
   nodes: {
@@ -583,7 +660,7 @@ const projectFilter = document.getElementById("projectFilter");
 const dateFilter = document.getElementById("dateFilter");
 
 function formatDate(d) {
-  return d.slice(0, 4) + "-" + d.slice(4, 6) + "-" + d.slice(6, 8);
+  return d.slice(0, 4) + "/" + d.slice(4, 6) + "/" + d.slice(6, 8);
 }
 
 projectFilter.addEventListener("change", () => {
